@@ -6,6 +6,7 @@ import { ChatInput } from '@/components/chat/ChatInput'
 import { ChatLayout } from '@/components/chat/ChatLayout'
 import { useAuth } from '@/hooks/useAuth'
 import { useChat } from '@/hooks/useChat'
+import { useRouter } from 'next/navigation'
 import { useEffect, useRef, useState } from 'react'
 
 
@@ -14,6 +15,7 @@ export default function HomePage() {
   const { messages, isLoading, error, sendMessageStreaming, clearMessages } = useChat()
 
 
+  const router = useRouter()
   const [message, setMessage] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -22,8 +24,19 @@ export default function HomePage() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  const handleSetMessage = (message: string) => {
+    if (!isSignedIn) {
+      router.push('/signin')
+      return
+    }
+    setMessage(message)
+  }
 
   const handleSendMessage = async () => {
+    if (!isSignedIn) {
+      router.push('/signin')
+      return
+    }
     if (!message.trim() || isLoading) return
     await sendMessageStreaming(message)
     setMessage('')
@@ -35,7 +48,7 @@ export default function HomePage() {
       <div className="flex flex-col h-full">     {/* <-- NEW wrapper controls layout */}
         {messages.length === 0 ? (
           <div className="flex-1 overflow-y-auto">
-            <ChatHero onPickPrompt={setMessage} />
+            <ChatHero onPickPrompt={handleSetMessage} />
           </div>
         ) : (
           <ChatHistory className="flex-1" messages={messages} isLoading={isLoading} messagesEndRef={messagesEndRef} setMessage={setMessage} handleSendMessage={handleSendMessage} />

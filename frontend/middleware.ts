@@ -11,8 +11,10 @@ const isProtectedRoute = createRouteMatcher([
 // Public routes
 const isPublicRoute = createRouteMatcher([
   '/',
-  // ⚠️ Make sure these match your actual routes/env (see note below)
+  // Support both /signin and /sign-in patterns
+  '/signin(.*)',
   '/sign-in(.*)',
+  '/signup(.*)',
   '/sign-up(.*)',
   '/api/public(.*)',
   '/health',

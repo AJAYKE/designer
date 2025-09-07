@@ -117,8 +117,6 @@ async def perform_health_checks(initialize_agent: bool = False) -> Dict[str, Any
         # Run all health checks concurrently
         checks = await asyncio.gather(
             check_postgres_connection(),
-            check_redis_connection(),
-            check_s3_connection(),
             check_openai_connection(),
             return_exceptions=True
         )
@@ -127,12 +125,8 @@ async def perform_health_checks(initialize_agent: bool = False) -> Dict[str, Any
         health_results = {
             "postgres": checks[0] if not isinstance(checks[0], Exception) 
                       else {"status": "error", "error": str(checks[0])},
-            "redis": checks[1] if not isinstance(checks[1], Exception) 
-                     else {"status": "error", "error": str(checks[1])},
-            "s3": checks[2] if not isinstance(checks[2], Exception) 
-                  else {"status": "error", "error": str(checks[2])},
-            "openai": checks[3] if not isinstance(checks[3], Exception) 
-                      else {"status": "error", "error": str(checks[3])},
+            "openai": checks[1] if not isinstance(checks[1], Exception) 
+                      else {"status": "error", "error": str(checks[1])},
             "timestamp": datetime.utcnow().isoformat(),
             "response_time_ms": round((datetime.utcnow() - start_time).total_seconds() * 1000, 2)
         }

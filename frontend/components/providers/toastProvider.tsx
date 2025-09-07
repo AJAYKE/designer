@@ -22,8 +22,14 @@ export function ToastProvider() {
         },
         className: 'group-[.toaster]:bg-background group-[.toaster]:text-foreground group-[.toaster]:border-border group-[.toaster]:shadow-lg',
         descriptionClassName: 'group-[.toast]:text-muted-foreground',
-        actionButtonClassName: 'group-[.toast]:bg-primary group-[.toast]:text-primary-foreground',
-        cancelButtonClassName: 'group-[.toast]:bg-muted group-[.toast]:text-muted-foreground',
+        actionButtonStyle: {
+          background: 'hsl(var(--primary))',
+          color: 'hsl(var(--primary-foreground))'
+        },
+        cancelButtonStyle: {
+          background: 'hsl(var(--muted))',
+          color: 'hsl(var(--muted-foreground))'
+        }
       }}
     />
   )

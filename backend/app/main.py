@@ -23,9 +23,9 @@ async def lifespan(app: FastAPI):
         else:
             health_results, critical_failures = result
 
-        print_connection_status("redis", health_results.get("redis", {}))
+        # print_connection_status("redis", health_results.get("redis", {}))
         print_connection_status("postgres", health_results.get("postgres", {}))
-        print_connection_status("s3", health_results.get("s3", {}))
+        # print_connection_status("s3", health_results.get("s3", {}))
         print_connection_status("openai", health_results.get("openai", {}))
 
         if critical_failures:

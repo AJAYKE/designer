@@ -22,9 +22,9 @@ export default function RootLayout({
     <ClerkProvider
       publishableKey={process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY!}
       appearance={{
-        baseTheme: undefined, 
+        baseTheme: undefined,
         variables: {
-          colorPrimary: "#6366f1", 
+          colorPrimary: "#6366f1",
           colorBackground: "#ffffff",
           colorInputBackground: "#ffffff",
           colorInputText: "#1f2937",
@@ -35,22 +35,22 @@ export default function RootLayout({
         }
       }}
     >
-    <html lang="en" suppressHydrationWarning>
-      <body className={inter.className}>
-        <ThemeProvider
-          attribute="class"
-          defaultTheme="system"
-          enableSystem
-          disableTransitionOnChange
-        >
-          <div className="min-h-screen bg-background text-foreground">
-          <Navbar />
-            {children}
-          </div>
-          <ToastProvider />
-        </ThemeProvider>
-      </body>
-    </html>
+      <html lang="en" suppressHydrationWarning>
+        <body className={inter.className}>
+          <ThemeProvider
+            attribute="class"
+            defaultTheme="light"
+            enableSystem
+            disableTransitionOnChange
+          >
+            <div className="min-h-screen bg-background text-foreground">
+              <Navbar />
+              {children}
+            </div>
+            <ToastProvider />
+          </ThemeProvider>
+        </body>
+      </html>
     </ClerkProvider>
   )
 }

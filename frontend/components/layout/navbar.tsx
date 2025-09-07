@@ -1,29 +1,27 @@
 "use client"
 
-import { ThemeToggle } from "@/components/theme/theme-toggle"
 import { Button } from "@/components/ui/button"
 import {
   SignedIn,
   SignedOut,
   SignInButton,
   SignUpButton,
-  UserButton,
-  useUser
+  UserButton
 } from "@clerk/nextjs"
-import { Palette, Sparkles } from "lucide-react"
+import { Palette } from "lucide-react"
 import Link from "next/link"
-import { usePathname } from "next/navigation"
+// import { usePathname } from "next/navigation"
 
-const navigation = [
-  { name: "Create", href: "/create" },
-  { name: "Browse", href: "/browse" },
-  { name: "Learn", href: "/learn" },
-  { name: "Pricing", href: "/pricing" },
-]
+// const navigation = [
+//   { name: "Create", href: "/create" },
+//   { name: "Browse", href: "/browse" },
+//   { name: "Learn", href: "/learn" },
+//   { name: "Pricing", href: "/pricing" },
+// ]
 
 export function Navbar() {
-  const pathname = usePathname()
-  const { user } = useUser()
+  // const pathname = usePathname()
+  // const { user } = useUser()
 
   return (
     <nav className="sticky top-0 z-50 w-full border-b border-border/40 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -53,11 +51,11 @@ export function Navbar() {
             ))}
           </nav>
         </div> */}
-
+        {/* 
         {/* Right side */}
         <div className="flex flex-1 items-center justify-between space-x-2 md:justify-end">
           {/* User-specific navigation */}
-          <SignedIn>
+          {/* <SignedIn>
             <div className="hidden md:flex items-center space-x-4">
               <Link href="/dashboard">
                 <Button variant="ghost" size="sm">
@@ -67,12 +65,12 @@ export function Navbar() {
               {user?.publicMetadata?.role === 'premium' && (
                 <Sparkles className="h-4 w-4 text-yellow-500" />
               )}
-            </div>
-          </SignedIn>
+            </div> 
+        </SignedIn> */}
 
           <div className="flex items-center space-x-4">
-            <ThemeToggle />
-            
+            {/* <ThemeToggle /> */}
+
             {/* Authentication Buttons */}
             <SignedOut>
               <SignInButton mode="modal">
@@ -101,6 +99,6 @@ export function Navbar() {
           </div>
         </div>
       </div>
-    </nav>
+    </nav >
   )
 }
