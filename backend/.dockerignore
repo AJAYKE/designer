@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.sqlite
+.env
+.venv/
+.git/
+.gitignore
+.dist/
+build/
+dist/
+*.egg-info/
+node_modules/
+.alembic/
