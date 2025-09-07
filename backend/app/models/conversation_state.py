@@ -2,47 +2,47 @@ from typing import TypedDict, Optional, List, Dict, Any
 from enum import Enum
 from datetime import datetime
 
-class ConversationPhase(str, Enum):
+class ConversationPhase(Enum):
     INITIAL = "initial"
     PLANNING = "planning"
-    AWAITING_APPROVAL = "awaiting_approval" 
-    PROCESSING_FEEDBACK = "processing_feedback"
+    AWAITING_APPROVAL = "awaiting_approval"
     GENERATING = "generating"
-    MODIFYING = "modifying"
-    CONVERSING = "conversing"
     COMPLETE = "complete"
     CANCELLED = "cancelled"
     ERROR = "error"
 
-class ConversationState(TypedDict):
-    # Core conversation tracking
+class ConversationState(TypedDict, total=False):
+    # Core state
     thread_id: str
-    user_id: str
     phase: ConversationPhase
-    
-    # Message handling
     current_message: str
-    message_history: List[Dict[str, Any]]
+    updated_at: str
+    progress: int  # 0-100
     
-    # Design planning
-    design_requirements: Optional[str]
-    design_plan: Optional[Dict[str, Any]]
-    plan_approved: bool
-    plan_modifications: List[str]
+    # Design process
+    design_requirements: str
+    design_plan: Dict[str, Any]
+    plan_changes: List[str]
+    human_feedback: Dict[str, Any]
     
-    # Human feedback
-    human_feedback: Optional[Dict[str, Any]]
-    
-    # Generation
+    # Generation process
     generated_screens: List[Dict[str, Any]]
     generation_progress: Dict[str, Any]
+    generation_summary: Dict[str, Any]
     
-    # Model selection
-    selected_model: str
+    # AI/LLM tracking
+    routing_confidence: float
+    token_usage: Dict[str, Any]
+    llm_operations: List[Dict[str, Any]]
     
-    # Context and memory
-    conversation_context: Dict[str, Any]
+    # Response and communication
+    last_response: str
+    requires_approval: bool
     
-    # Timestamps
-    created_at: str
-    updated_at: str
+    # Error handling
+    error_message: str
+    fallback_used: bool
+    
+    # Metadata
+    user_preferences: Dict[str, Any]
+    session_metadata: Dict[str, Any]

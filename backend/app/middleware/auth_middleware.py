@@ -11,7 +11,7 @@ security = HTTPBearer(auto_error=False)
 class ClerkAuth:
     def __init__(self):
         if settings.CLERK_SECRET_KEY:
-            self.clerk = Clerk(api_key=settings.CLERK_SECRET_KEY)
+            self.clerk = Clerk(bearer_auth=settings.CLERK_SECRET_KEY)
         else:
             self.clerk = None
     

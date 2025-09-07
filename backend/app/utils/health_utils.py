@@ -145,22 +145,6 @@ async def perform_health_checks(initialize_agent: bool = False) -> Dict[str, Any
             if not ok:
                 critical_failures.append(f"{svc.upper()}: {st.get('status')} - {st.get('error')}")
         
-        # Initialize agent if requested and there are no critical failures
-        if initialize_agent and not critical_failures:
-            from app.agents.design_agent import create_design_agent
-            try:
-                agent_tuple = await create_design_agent()
-                health_status.agent_status = "healthy"
-                health_results["agent"] = {"status": "healthy"}
-                print(_ok("Design agent created"))
-                return agent_tuple, health_results, critical_failures
-            except Exception as e:
-                err_msg = f"{e}"
-                print(_fail("Design agent created", err_msg))
-                health_status.startup_errors.append(f"Failed to initialize LangGraph Agent: {err_msg}")
-                health_status.agent_status = "unhealthy"
-                critical_failures.append(f"AGENT: unhealthy - {err_msg}")
-                health_results["agent"] = {"status": "error", "error": err_msg}
         
         # Update last checked timestamp
         health_status.last_checked = datetime.utcnow().isoformat()

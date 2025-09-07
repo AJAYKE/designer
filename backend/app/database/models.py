@@ -3,7 +3,7 @@ from sqlalchemy.sql import func
 from app.core.database import Base
 
 class Design(Base):
-    """Enhanced design model with more tracking"""
+    """design model with more tracking"""
     __tablename__ = "designs"
     
     id = Column(Integer, primary_key=True, index=True)

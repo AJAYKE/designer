@@ -1,24 +1,30 @@
-from fastapi import APIRouter, HTTPException, Request, Depends
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from typing import Optional, Dict, Any, AsyncGenerator, List
+from typing import Any, Dict, Optional, AsyncGenerator, Set
+from datetime import datetime
 import json
 import asyncio
-from datetime import datetime
-from uuid import uuid4
 
-from app.models.conversation_state import ConversationState, ConversationPhase
-from app.middleware.auth_middleware import get_current_user
-from app.middleware.rate_limit_middleware import request_rate_limit
-# from app.agents.conversational_agent import build_conversational_agent
+from fastapi import APIRouter, Depends, Request, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
+from pydantic import BaseModel
+
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.store.postgres.aio import AsyncPostgresStore
+
+from app.core.config import settings
+from app.core.auth import get_current_user
+from app.agents.agent import build_conversational_agent
+from app.models.conversation_state import ConversationPhase
+from app.services.llm_service import LLMService
 
 router = APIRouter()
 
 class ChatRequest(BaseModel):
     message: str
     thread_id: Optional[str] = None
-    model: str = "openai:gpt-4"
+    model: str = "gpt-4o-mini"
     stream: bool = True
+    include_token_usage: bool = False
 
 class ChatResponse(BaseModel):
     thread_id: str
@@ -26,369 +32,332 @@ class ChatResponse(BaseModel):
     response: str
     data: Optional[Dict[str, Any]] = None
     requires_approval: bool = False
+    token_usage: Optional[Dict[str, Any]] = None
+    generation_progress: Optional[Dict[str, Any]] = None
 
-@router.post("/chat")
-@request_rate_limit(calls=20, period=60)  # 20 messages per minute
-async def unified_chat_endpoint(
+# Global LLM service instance for token tracking
+llm_service = LLMService()
+
+def _encode_sse(event: Dict[str, Any]) -> bytes:
+    """Server-Sent Events formatter"""
+    payload = json.dumps(event, ensure_ascii=False, default=str)
+    return f"data: {payload}\n\n".encode("utf-8")
+
+def _human_response_from_state(state: dict) -> str:
+    if last := state.get("last_response"):
+        return last
+
+    phase = state.get("phase", ConversationPhase.INITIAL)
+    plan = state.get("design_plan", {}) or {}
+    progress = state.get("generation_progress", {}) or {}
+    screens = plan.get("screens", []) or state.get("generated_screens", [])
+
+    if phase == ConversationPhase.INITIAL:
+        return "Hello! Tell me what you want to build, and I’ll plan and generate it."
+    elif phase == ConversationPhase.PLANNING:
+        return "Analyzing your requirements and creating a plan…"
+    elif phase == ConversationPhase.GENERATING:
+        if progress:
+            name = progress.get("current_screen_name") or "your screens"
+            pct = progress.get("overall_progress", 0)
+            return f"Generating {name}… {pct}% complete"
+        return "Creating your screens…"
+    elif phase == ConversationPhase.COMPLETE:
+        n = len(state.get("generated_screens", []) or screens)
+        return f"🎉 Successfully generated {n} screen{'s' if n!=1 else ''}! Your design is ready."
+    elif phase == ConversationPhase.CANCELLED:
+        return "Process cancelled. Start a new request anytime!"
+    elif phase == ConversationPhase.ERROR:
+        return f"Sorry, there was an error: {state.get('error_message','Something went wrong')}. Please try again."
+    return "I’m ready to build. What would you like to create?"
+
+def _state_to_response(thread_id: str, state: Dict[str, Any], include_token_usage: bool = False) -> Dict[str, Any]:
+    phase = state.get("phase", ConversationPhase.INITIAL)
+    response_text = _human_response_from_state(state)
+
+    data = {}
+    if plan := state.get("design_plan"):
+        data["design_plan"] = plan
+    if progress := state.get("generation_progress"):
+        data["generation_progress"] = progress
+    if screens := state.get("generated_screens"):
+        data["generated_screens"] = screens
+    if summary := state.get("generation_summary"):
+        data["generation_summary"] = summary
+    if changes := state.get("plan_changes"):
+        data["plan_changes"] = changes
+    if confidence := state.get("routing_confidence"):
+        data["routing_confidence"] = confidence
+    if fallback := state.get("fallback_used"):
+        data["fallback_used"] = fallback
+
+    resp = {
+        "thread_id": thread_id,
+        "phase": phase.value,
+        "response": response_text,
+        "data": data or None,
+        "requires_approval": False,                 # ← always false now
+        "generation_progress": state.get("generation_progress"),
+        "progress": state.get("progress", 0),
+    }
+    if include_token_usage and hasattr(llm_service, 'token_tracker'):
+        resp["token_usage"] = llm_service.token_tracker.get_session_summary()
+    return resp
+
+async def _make_checkpointer_and_store():
+    """Create database connections for checkpointing and storage"""
+    saver_cm = AsyncPostgresSaver.from_conn_string(settings.DATABASE_URL)
+    store_cm = AsyncPostgresStore.from_conn_string(settings.DATABASE_URL)
+    
+    saver = await saver_cm.__aenter__()
+    store = await store_cm.__aenter__()
+    
+    await saver.setup()
+    await store.setup()
+    
+    return saver_cm, store_cm, saver, store
+
+async def _close_checkpointer_and_store(saver_cm, store_cm):
+    """Clean up database connections"""
+    try:
+        if saver_cm:
+            await saver_cm.__aexit__(None, None, None)
+    finally:
+        if store_cm:
+            await store_cm.__aexit__(None, None, None)
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat(
     chat_request: ChatRequest,
     request: Request,
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     """
-    Unified conversational endpoint that handles:
-    1. Initial design requests
-    2. Plan approval/editing  
-    3. Generation progress streaming
-    4. Follow-up modifications
-    5. General conversation
+    Fixed chat endpoint with proper streaming and conversational flow
     """
+    thread_id = chat_request.thread_id or f"t_{int(datetime.utcnow().timestamp()*1000)}"
+    user_id = str(current_user.get("id") or current_user.get("sub") or "anonymous")
     
-    if request.stream:
-        return StreamingResponse(
-            _stream_conversation(chat_request, current_user, request),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Headers": "*"
-            }
-        )
-    else:
-        return await _handle_single_chat_request(chat_request, current_user, request)
-
-
-async def _stream_conversation(
-    request: ChatRequest,
-    current_user: Dict[str, Any],
-    fastapi_request: Request
-) -> AsyncGenerator[str, None]:
-    """Stream conversation responses with real-time updates"""
+    saver_cm = store_cm = saver = store = None
     
     try:
-        user_id = current_user["user_id"]
-        thread_id = request.thread_id or str(uuid4())
+        # Create database connections
+        saver_cm, store_cm, saver, store = await _make_checkpointer_and_store()
         
-        # Get conversational agent
-        agent, checkpointer, store = fastapi_request.app.state.conversational_agent
+        # Store incoming request for audit
+        await store.aput(
+            ("requests", user_id),
+            f"{thread_id}:{int(datetime.utcnow().timestamp())}",
+            {
+                "message": chat_request.message,
+                "model": chat_request.model,
+                "timestamp": datetime.utcnow().isoformat(),
+                "ip": request.client.host if request.client else None,
+                "user_agent": request.headers.get("user-agent", ""),
+            },
+        )
 
-        
-        config = {
+        # Configure execution
+        config: RunnableConfig = {
             "configurable": {
-                "thread_id": thread_id,
                 "user_id": user_id,
-            }
+                "thread_id": thread_id,
+                "model": chat_request.model,
+            },
+            "thread_id": thread_id,
         }
         
-        # Get existing conversation state or create new
-        existing_state = await checkpointer.aget(config)
+        # Build agent graph
+        graph = build_conversational_agent(checkpointer=saver, store=store)
+
+        prior = await graph.aget_state(config)
+        base_values = (prior.values if prior and prior.values else {})
 
         
-        if existing_state:
-            # Continue existing conversation
-            initial_state = {
-                **existing_state,
-                "current_message": request.message,
-                "selected_model": request.model,
-                "updated_at": datetime.utcnow().isoformat()
-            }
-        else:
-            # New conversation
-            initial_state = ConversationState(
-                thread_id=thread_id,
-                user_id=user_id,
-                phase=ConversationPhase.INITIAL,
-                current_message=request.message,
-                message_history=[],
-                design_requirements=None,
-                design_plan=None,
-                plan_approved=False,
-                plan_modifications=[],
-                human_feedback=None,
-                generated_screens=[],
-                generation_progress={},
-                selected_model=request.model,
-                conversation_context={},
-                created_at=datetime.utcnow().isoformat(),
-                updated_at=datetime.utcnow().isoformat()
+        # Prepare initial state
+        initial_state = {
+            **base_values,
+            "thread_id": thread_id,
+            "current_message": chat_request.message,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        
+    
+        
+        if chat_request.stream:
+            # === STREAMING RESPONSE ===
+            async def event_stream() -> AsyncGenerator[bytes, None]:
+                try:
+                    # Track what we've already sent to avoid duplicates
+                    sent_states: Set[str] = set()
+                    last_response = ""
+                    
+                    # For LLM streaming events, we need to handle them specially
+                    streaming_content = ""
+                    current_screen_id = None
+                    
+                    async for event in graph.astream_events(initial_state, config=config, version="v2"):
+                        event_type = event.get("event", "")
+                        event_name = event.get("name", "")
+                        event_data = event.get("data", {})
+                        
+                        # Handle LLM streaming events (chunk by chunk)
+                        if event_type == "on_llm_stream" and event_data.get("chunk"):
+                            chunk_content = event_data["chunk"].get("content", "")
+                            if chunk_content:
+                                streaming_content += chunk_content
+                                
+                                # Stream the chunk immediately
+                                chunk_payload = {
+                                    "thread_id": thread_id,
+                                    "type": "content_chunk",
+                                    "content": chunk_content,
+                                    "accumulated_content": streaming_content,
+                                    "screen_id": current_screen_id
+                                }
+                                yield _encode_sse(chunk_payload)
+                        
+                        # Handle our custom streaming events from generator
+                        elif event_type == "on_custom_event" and event_name == "llm_stream":
+                            stream_data = event_data.get("data", {})
+                            if stream_data.get("type") == "content_delta":
+                                chunk_payload = {
+                                    "thread_id": thread_id,
+                                    "type": "generation_chunk", 
+                                    "content": stream_data.get("content", ""),
+                                    "accumulated_content": stream_data.get("accumulated_content", ""),
+                                    "screen_id": stream_data.get("screen_id")
+                                }
+                                yield _encode_sse(chunk_payload)
+                        
+                        # Handle node completion events (but avoid duplicates)
+                        elif event_type == "on_chain_end" and event_name in ["router", "planner", "generator", "LangGraph"]:
+                            output = event_data.get("output")
+                            
+                            if isinstance(output, dict) and output.get("phase"):
+                                # Create a hash of the relevant state to detect duplicates
+                                state_hash = f"{output.get('phase', '')}:{output.get('last_response', '')}:{output.get('progress', 0)}"
+                                
+                                if state_hash not in sent_states:
+                                    sent_states.add(state_hash)
+                                    
+                                    current_response = _human_response_from_state(output)
+                                    
+                                    # Only send if response actually changed
+                                    if current_response != last_response:
+                                        last_response = current_response
+                                        
+                                        payload = _state_to_response(
+                                            thread_id, 
+                                            output, 
+                                            chat_request.include_token_usage
+                                        )
+                                        
+                                        # Add minimal metadata
+                                        payload["event_source"] = event_name
+                                        
+                                        yield _encode_sse(payload)
+                        
+                        # Check for client disconnect
+                        if await request.is_disconnected():
+                            break
+                    
+                    # Send completion event
+                    completion_payload = {
+                        "thread_id": thread_id,
+                        "type": "stream_complete",
+                        "message": "Stream completed successfully"
+                    }
+                    
+                    if chat_request.include_token_usage:
+                        completion_payload["session_token_usage"] = llm_service.token_tracker.get_session_summary()
+                    
+                    yield _encode_sse(completion_payload)
+                    
+                except asyncio.CancelledError:
+                    yield _encode_sse({
+                        "thread_id": thread_id,
+                        "type": "cancelled",
+                        "message": "Stream cancelled by client"
+                    })
+                except Exception as e:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(f"Streaming error: {e}", exc_info=True)
+                    yield _encode_sse({
+                        "thread_id": thread_id,
+                        "type": "error",
+                        "message": str(e)
+                    })
+                finally:
+                    # Clean up resources
+                    await _close_checkpointer_and_store(saver_cm, store_cm)
+            
+            return StreamingResponse(
+                event_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache, no-transform",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
             )
         
-        # Stream conversation processing
-        async for chunk in agent.astream(
-            initial_state,
-            config,
-            stream_mode="values"
-        ):
-            current_state = chunk
+        else:
+            # === NON-STREAMING RESPONSE ===
+            final_state = await graph.ainvoke(initial_state, config=config)
             
-            # Create streaming response based on phase
-            stream_data = await _create_stream_response(current_state, request.message)
-            
-            yield f"data: {json.dumps(stream_data, default=str)}\n\n"
-            
-            # Handle interruption points
-            if current_state.get("phase") == ConversationPhase.AWAITING_APPROVAL:
-                # Send approval request and wait
-                approval_data = {
-                    "type": "approval_required",
-                    "thread_id": thread_id,
-                    "phase": current_state["phase"],
-                    "design_plan": current_state.get("design_plan"),
-                    "requires_human_input": True,
-                    "message": "Please review the plan above. Say 'looks good' to proceed, or suggest changes."
+            # Store final state for analytics
+            await store.aput(
+                ("final_states", user_id),
+                thread_id,
+                {
+                    "state": final_state,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "token_usage": llm_service.token_tracker.get_session_summary() if chat_request.include_token_usage else None,
                 }
-                
-                yield f"data: {json.dumps(approval_data, default=str)}\n\n"
-                break  # Wait for next user message
+            )
             
-            # Break if conversation complete
-            if current_state.get("phase") in [ConversationPhase.COMPLETE, ConversationPhase.ERROR]:
-                break
+            await _close_checkpointer_and_store(saver_cm, store_cm)
             
-            # Small delay to prevent overwhelming
-            await asyncio.sleep(0.1)
-        
+            return JSONResponse(_state_to_response(
+                thread_id, 
+                final_state, 
+                chat_request.include_token_usage
+            ))
+    
     except Exception as e:
-        error_response = {
-            "type": "error",
-            "error": str(e),
-            "thread_id": thread_id if 'thread_id' in locals() else "unknown"
-        }
-        yield f"data: {json.dumps(error_response)}\n\n"
-
-
-async def _handle_single_chat_request(
-    request: ChatRequest,
-    current_user: Dict[str, Any],
-    fastapi_request: Request
-) -> ChatResponse:
-    """Handle non-streaming chat request"""
-    
-    user_id = current_user["user_id"]
-    thread_id = request.thread_id or str(uuid4())
-    
-    # Get conversational agent
-    agent, checkpointer, store = fastapi_request.app.state.conversational_agent
-    
-    config = {
-        "configurable": {
-            "thread_id": thread_id,
-            "user_id": user_id,
-        }
-    }
-    
-    # Process conversation
-    result_state = None
-    async for chunk in agent.astream(
-        {"current_message": request.message, "thread_id": thread_id, "user_id": user_id},
-        config,
-        stream_mode="values"
-    ):
-        result_state = chunk
+        # Ensure cleanup on any error
+        await _close_checkpointer_and_store(saver_cm, store_cm)
         
-        # Stop at interruption points
-        if result_state.get("phase") == ConversationPhase.AWAITING_APPROVAL:
-            break
-    
-    # Create response
-    return ChatResponse(
-        thread_id=thread_id,
-        phase=result_state.get("phase", ConversationPhase.ERROR),
-        response=_generate_response_message(result_state),
-        data=_extract_response_data(result_state),
-        requires_approval=result_state.get("phase") == ConversationPhase.AWAITING_APPROVAL
-    )
-
-
-async def _create_stream_response(state: ConversationState, original_message: str) -> Dict[str, Any]:
-    """Create appropriate streaming response based on conversation state"""
-    
-    phase = state.get("phase", ConversationPhase.INITIAL)
-    
-    base_response = {
-        "thread_id": state["thread_id"],
-        "phase": phase,
-        "timestamp": datetime.utcnow().isoformat()
-    }
-    
-    if phase == ConversationPhase.PLANNING:
-        return {
-            **base_response,
-            "type": "planning",
-            "message": "Analyzing your requirements and creating a design plan...",
-            "status": "thinking"
-        }
-    
-    elif phase == ConversationPhase.AWAITING_APPROVAL:
-        return {
-            **base_response,
-            "type": "plan_ready",
-            "message": "Here's your design plan:",
-            "design_plan": state.get("design_plan"),
-            "status": "awaiting_approval"
-        }
-    
-    elif phase == ConversationPhase.GENERATING:
-        progress = state.get("generation_progress", {})
-        return {
-            **base_response,
-            "type": "generating",
-            "message": "Generating your designs...",
-            "progress": progress,
-            "status": "generating"
-        }
-    
-    elif phase == ConversationPhase.COMPLETE:
-        return {
-            **base_response,
-            "type": "complete",
-            "message": "Your designs are ready!",
-            "generated_screens": state.get("generated_screens", []),
-            "status": "complete"
-        }
-    
-    else:
-        return {
-            **base_response,
-            "type": "message",
-            "message": _generate_response_message(state),
-            "status": "ready"
-        }
-
-
-def _generate_response_message(state: ConversationState) -> str:
-    """Generate appropriate response message based on state"""
-    
-    phase = state.get("phase", ConversationPhase.INITIAL)
-    
-    messages = {
-        ConversationPhase.PLANNING: "Let me analyze your requirements and create a design plan...",
-        ConversationPhase.AWAITING_APPROVAL: "Please review the design plan above and let me know if you'd like to proceed or make changes.",
-        ConversationPhase.GENERATING: "Generating your designs now...",
-        ConversationPhase.COMPLETE: "Your designs are ready! You can preview, copy, or export them.",
-        ConversationPhase.ERROR: f"I encountered an error: {state.get('error_message', 'Unknown error')}",
-        ConversationPhase.CANCELLED: "Design process cancelled. Feel free to start a new design anytime!"
-    }
-    
-    return messages.get(phase, "How can I help you with your design?")
-
-
-def _extract_response_data(state: ConversationState) -> Optional[Dict[str, Any]]:
-    """Extract relevant data for response"""
-    
-    phase = state.get("phase")
-    
-    if phase == ConversationPhase.AWAITING_APPROVAL:
-        return {"design_plan": state.get("design_plan")}
-    elif phase == ConversationPhase.GENERATING:
-        return {"progress": state.get("generation_progress")}
-    elif phase == ConversationPhase.COMPLETE:
-        return {"generated_screens": state.get("generated_screens")}
-    else:
-        return None
-
-
-@router.get("/chat/{thread_id}/status")
-async def get_chat_status(
-    thread_id: str,
-    request: Request,
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
-    """Get current status of a chat conversation"""
-    
-    try:
-        user_id = current_user["user_id"]
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Chat endpoint error: {e}", exc_info=True)
         
-        # Get conversational agent
-        agent, checkpointer, store = fastapi_request.app.state.conversational_agent
-        
-        config = {
-            "configurable": {
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "chat_processing_failed",
+                "message": str(e),
                 "thread_id": thread_id,
-                "user_id": user_id,
             }
-        }
-        
-        # Get current state
-        state = await checkpointer.aget(config)
-        if not state:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        
+        )
+
+@router.get("/chat/{thread_id}/usage")
+async def get_usage_stats(
+    thread_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Get token usage statistics for a conversation thread"""
+    
+    if hasattr(llm_service, 'token_tracker'):
         return {
             "thread_id": thread_id,
-            "phase": state.get("phase"),
-            "requires_approval": state.get("phase") == ConversationPhase.AWAITING_APPROVAL,
-            "design_plan": state.get("design_plan"),
-            "generated_screens": state.get("generated_screens", []),
-            "updated_at": state.get("updated_at")
+            "session_summary": llm_service.token_tracker.get_session_summary(),
+            "recent_operations": llm_service.token_tracker.get_recent_operations(minutes=30),
         }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get chat status: {str(e)}")
-
-
-@router.post("/chat/{thread_id}/resume")
-async def resume_interrupted_chat(
-    thread_id: str,
-    request: Request,
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
-    """Resume an interrupted conversation (after approval)"""
     
-    try:
-        user_id = current_user["user_id"]
-        
-        # Get conversational agent
-        agent, checkpointer, store = fastapi_request.app.state.conversational_agent
-        
-        config = {
-            "configurable": {
-                "thread_id": thread_id,
-                "user_id": user_id,
-            }
-        }
-        
-        # Resume from interruption
-        result_state = None
-        async for chunk in agent.astream(None, config, stream_mode="values"):
-            result_state = chunk
-            break
-        
-        return {
-            "thread_id": thread_id,
-            "resumed": True,
-            "phase": result_state.get("phase") if result_state else "unknown"
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to resume chat: {str(e)}")
-
-
-@router.delete("/chat/{thread_id}")
-async def delete_conversation(
-    thread_id: str,
-    request: Request,
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
-    """Delete a conversation and its history"""
-    
-    try:
-        user_id = current_user["user_id"]
-        
-        # Get conversational agent
-        agent, checkpointer, store = fastapi_request.app.state.conversational_agent
-        
-        config = {
-            "configurable": {
-                "thread_id": thread_id,
-                "user_id": user_id,
-            }
-        }
-        
-        # Delete from checkpointer
-        await checkpointer.adelete(config)
-        
-        return {"message": f"Conversation {thread_id} deleted successfully"}
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete conversation: {str(e)}")
+    return {
+        "thread_id": thread_id,
+        "message": "Token tracking not available",
+    }

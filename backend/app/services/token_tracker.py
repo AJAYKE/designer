@@ -1,111 +1,121 @@
-import redis.asyncio as redis
-from typing import Dict, Any, Optional
-from app.core.config import settings
-from datetime import datetime
-import json
+import time
+from typing import Dict, List, Any
+from datetime import datetime, timedelta
+import logging
+
+logger = logging.getLogger(__name__)
 
 class TokenTracker:
+    """Enhanced token usage tracking with analytics"""
+    
     def __init__(self):
-        self.redis_client = redis.from_url(settings.REDIS_URL)
+        self.session_usage = {
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "total_cost": 0.0,
+            "operations": [],
+            "start_time": datetime.utcnow(),
+            "models_used": set()
+        }
         
-    async def track_usage(
-        self,
-        prompt_tokens: int,
-        completion_tokens: int,
-        model: str,
-        operation_type: str,
-        duration_ms: int,
-        user_id: Optional[str] = None
-    ) -> None:
-        """Track token usage with Redis for rate limiting and analytics"""
+        # Cost per 1K tokens (approximate GPT-4o-mini pricing)
+        self.cost_per_1k = {
+            "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
+            "gpt-4o": {"input": 0.005, "output": 0.015},
+            "gpt-4": {"input": 0.03, "output": 0.06}
+        }
+    
+    async def track_usage(self, prompt_tokens: int, completion_tokens: int, 
+                         model: str, operation_type: str, duration_ms: int,
+                         metadata: Dict[str, Any] = None):
+        """Track detailed token usage with cost calculation"""
         
-        total_tokens = prompt_tokens + completion_tokens
-        timestamp = datetime.utcnow().isoformat()
+        # Calculate costs
+        model_costs = self.cost_per_1k.get(model, self.cost_per_1k["gpt-4o-mini"])
+        prompt_cost = (prompt_tokens / 1000) * model_costs["input"]
+        completion_cost = (completion_tokens / 1000) * model_costs["output"]
+        total_cost = prompt_cost + completion_cost
         
-        # Usage record
-        usage_record = {
+        # Update session totals
+        self.session_usage["total_prompt_tokens"] += prompt_tokens
+        self.session_usage["total_completion_tokens"] += completion_tokens
+        self.session_usage["total_cost"] += total_cost
+        self.session_usage["models_used"].add(model)
+        
+        # Record operation details
+        operation = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "operation_type": operation_type,
+            "model": model,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
-            "model": model,
-            "operation_type": operation_type,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "cost": total_cost,
             "duration_ms": duration_ms,
-            "timestamp": timestamp,
-            "user_id": user_id
+            "metadata": metadata or {}
         }
         
-        try:
-            # Store detailed usage record
-            usage_key = f"token_usage:{datetime.utcnow().strftime('%Y%m%d')}:{operation_type}"
-            await self.redis_client.lpush(usage_key, json.dumps(usage_record))
-            await self.redis_client.expire(usage_key, 86400 * 7)  # Keep for 7 days
-            
-            # Update user hourly token count (for rate limiting)
-            if user_id:
-                hour_key = f"user_tokens:{user_id}:{datetime.utcnow().strftime('%Y%m%d%H')}"
-                await self.redis_client.incrby(hour_key, total_tokens)
-                await self.redis_client.expire(hour_key, 3600)  # 1 hour
-                
-                # Update daily token count
-                day_key = f"user_tokens_daily:{user_id}:{datetime.utcnow().strftime('%Y%m%d')}"
-                await self.redis_client.incrby(day_key, total_tokens)
-                await self.redis_client.expire(day_key, 86400)  # 24 hours
-            
-            # Global rate limiting
-            global_hour_key = f"global_tokens:{datetime.utcnow().strftime('%Y%m%d%H')}"
-            await self.redis_client.incrby(global_hour_key, total_tokens)
-            await self.redis_client.expire(global_hour_key, 3600)
-            
-        except Exception as e:
-            print(f"⚠️ Token tracking error: {e}")
-    
-    async def get_user_token_usage(self, user_id: str) -> Dict[str, int]:
-        """Get current token usage for a user"""
+        self.session_usage["operations"].append(operation)
         
-        try:
-            current_hour = datetime.utcnow().strftime('%Y%m%d%H')
-            current_day = datetime.utcnow().strftime('%Y%m%d')
-            
-            hour_key = f"user_tokens:{user_id}:{current_hour}"
-            day_key = f"user_tokens_daily:{user_id}:{current_day}"
-            
-            hourly_usage = await self.redis_client.get(hour_key)
-            daily_usage = await self.redis_client.get(day_key)
-            
-            return {
-                "hourly_tokens": int(hourly_usage) if hourly_usage else 0,
-                "daily_tokens": int(daily_usage) if daily_usage else 0,
-                "hourly_limit": settings.RATE_LIMIT_TOKENS_PER_HOUR,
-                "daily_limit": settings.RATE_LIMIT_TOKENS_PER_HOUR * 24
-            }
-            
-        except Exception as e:
-            print(f"⚠️ Token usage retrieval error: {e}")
-            return {"hourly_tokens": 0, "daily_tokens": 0}
-    
-    async def check_rate_limit(self, user_id: str, estimated_tokens: int) -> Dict[str, Any]:
-        """Check if user can make a request without exceeding limits"""
-        
-        usage = await self.get_user_token_usage(user_id)
-        
-        hourly_remaining = settings.RATE_LIMIT_TOKENS_PER_HOUR - usage["hourly_tokens"]
-        daily_remaining = (settings.RATE_LIMIT_TOKENS_PER_HOUR * 24) - usage["daily_tokens"]
-        
-        can_proceed = (
-            estimated_tokens <= hourly_remaining and 
-            estimated_tokens <= daily_remaining
+        # Log usage
+        logger.info(
+            f"LLM Usage - {operation_type}: "
+            f"{prompt_tokens}p + {completion_tokens}c = {prompt_tokens + completion_tokens} tokens, "
+            f"${total_cost:.4f}, {duration_ms}ms ({model})"
         )
         
+        return operation
+    
+    def get_session_summary(self) -> Dict[str, Any]:
+        """Get comprehensive session usage summary"""
+        duration = datetime.utcnow() - self.session_usage["start_time"]
+        
+        # Calculate operation type breakdown
+        operation_breakdown = {}
+        for op in self.session_usage["operations"]:
+            op_type = op["operation_type"]
+            if op_type not in operation_breakdown:
+                operation_breakdown[op_type] = {
+                    "count": 0,
+                    "total_tokens": 0,
+                    "total_cost": 0.0,
+                    "avg_duration": 0
+                }
+            
+            operation_breakdown[op_type]["count"] += 1
+            operation_breakdown[op_type]["total_tokens"] += op["total_tokens"]
+            operation_breakdown[op_type]["total_cost"] += op["cost"]
+            operation_breakdown[op_type]["avg_duration"] += op["duration_ms"]
+        
+        # Calculate averages
+        for op_type in operation_breakdown:
+            count = operation_breakdown[op_type]["count"]
+            if count > 0:
+                operation_breakdown[op_type]["avg_duration"] = int(
+                    operation_breakdown[op_type]["avg_duration"] / count
+                )
+        
         return {
-            "can_proceed": can_proceed,
-            "hourly_remaining": hourly_remaining,
-            "daily_remaining": daily_remaining,
-            "estimated_tokens": estimated_tokens,
-            "reason": None if can_proceed else "Token limit exceeded"
+            "session_duration_minutes": duration.total_seconds() / 60,
+            "total_operations": len(self.session_usage["operations"]),
+            "total_tokens": self.session_usage["total_prompt_tokens"] + self.session_usage["total_completion_tokens"],
+            "prompt_tokens": self.session_usage["total_prompt_tokens"],
+            "completion_tokens": self.session_usage["total_completion_tokens"],
+            "total_cost": self.session_usage["total_cost"],
+            "models_used": list(self.session_usage["models_used"]),
+            "operation_breakdown": operation_breakdown,
+            "cost_per_token": self.session_usage["total_cost"] / max(1, self.session_usage["total_prompt_tokens"] + self.session_usage["total_completion_tokens"]),
+            "tokens_per_minute": (self.session_usage["total_prompt_tokens"] + self.session_usage["total_completion_tokens"]) / max(1, duration.total_seconds() / 60)
         }
     
-    async def count_tokens(self, text: str) -> int:
-        """Estimate token count for text (rough approximation)"""
-        # Simple estimation: ~1.3 tokens per word
-        words = len(text.split())
-        return int(words * 1.3)
+    def get_recent_operations(self, minutes: int = 5) -> List[Dict[str, Any]]:
+        """Get operations from the last N minutes"""
+        cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+        
+        recent_ops = []
+        for op in self.session_usage["operations"]:
+            op_time = datetime.fromisoformat(op["timestamp"])
+            if op_time >= cutoff:
+                recent_ops.append(op)
+        
+        return recent_ops

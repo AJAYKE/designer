@@ -10,6 +10,11 @@ class UnsplashImage(BaseModel):
     width: int
     height: int
     author: str
+    author_username: str
+    author_profile: str   # with UTM
+    unsplash_link: str    # with UTM
+    download_location: str
+
 
 
 class GenerationPhase(str, Enum):

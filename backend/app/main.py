@@ -1,84 +1,56 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from app.routers import chat
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from datetime import datetime
-
 from app.core.config import settings
-from app.routers import generation, images
+from app.routers import images, auth, designs, chat
 from app.middleware.rate_limit_middleware import limiter
-from app.utils.health_utils import (
-    health_status,
-    perform_health_checks,
-    print_connection_status
-)
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from langgraph.store.postgres.aio import AsyncPostgresStore
-from app.agents.conversational_agent import build_conversational_agent
-
+from app.utils.health_utils import ( health_status, perform_health_checks, print_connection_status )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    print("🚀 Enhanced AI Design Platform Backend Starting...")
-
-    # Perform initial health checks and agent initialization
+    print("🚀 AI Design Platform Backend Starting...")
     print("🔍 Running startup health checks...")
+
     try:
-        # This will perform health checks and initialize the agent if all checks pass
+        # Health checks + optional agent init
         result = await perform_health_checks(initialize_agent=True)
-        
-        if len(result) == 3:  # Agent was initialized
+        if len(result) == 3:
             agent_tuple, health_results, critical_failures = result
             app.state.design_agent = agent_tuple
-        else:  # Only health checks were performed
+        else:
             health_results, critical_failures = result
-        
-        # Print a clean one-liner for each core service
+
         print_connection_status("redis", health_results.get("redis", {}))
         print_connection_status("postgres", health_results.get("postgres", {}))
         print_connection_status("s3", health_results.get("s3", {}))
         print_connection_status("openai", health_results.get("openai", {}))
-        
+
         if critical_failures:
             print("\n⚠️  Critical failures detected:")
             for failure in critical_failures:
                 print(f"  • {failure}")
-                        
+
     except Exception as e:
         print(f"❌ Failed to complete startup: {str(e)}")
         raise
 
-    async with AsyncPostgresSaver.from_conn_string(settings.DATABASE_URL) as checkpointer, \
-            AsyncPostgresStore.from_conn_string(settings.DATABASE_URL) as store:
-        
-        await checkpointer.setup()
-        await store.setup()
-        agent = build_conversational_agent(checkpointer, store) 
+    # Rate limiter and health flag
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    health_status.startup_checks_completed = True
+    print("✅ Startup health checks completed")
 
-        app.state.conversational_agent = (agent, checkpointer, store)
+    # ---- yield to run the app ----
+    yield
 
-        # set limiter, handlers, flags BEFORE yield
-        app.state.limiter = limiter
-        app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-        health_status.startup_checks_completed = True
-        yield
-
-    # Shutdown
-    print("🛑 Enhanced AI Design Platform Backend Shutting Down...")
-    try:
-        agent, checkpointer, store = app.state.design_agent
-        if hasattr(checkpointer, 'aclose'):
-            await checkpointer.aclose()
-        if hasattr(store, 'aclose'):
-            await store.aclose()
-    except Exception as e:
-        print(f"⚠️  Error during shutdown: {str(e)}")
-
+    # ---- shutdown ----
+    print("🛑 AI Design Platform Backend Shutting Down...")
+      
 app = FastAPI(
-    title="Enhanced AI Design Platform API",
+    title="AI Design Platform API",
     description="Production-ready AI design generation with authentication and rate limiting",
     version="2.0.0",
     lifespan=lifespan
@@ -95,8 +67,10 @@ app.add_middleware(
 
 # Include routers
 app.include_router(chat.router, prefix="/api/v1", tags=["chat"])
-app.include_router(generation.router, prefix="/api/v1", tags=["generation"])
 app.include_router(images.router, prefix="/api/v1", tags=["images"])
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["authentication"])
+app.include_router(designs.router, prefix="/api/v1/designs", tags=["designs"])
+
 
 @app.get("/")
 async def root():

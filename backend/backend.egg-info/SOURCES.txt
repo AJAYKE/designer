@@ -1,5 +1,6 @@
 README.md
 pyproject.toml
+alembic/env.py
 app/__init__.py
 app/main.py
 backend.egg-info/PKG-INFO

@@ -1,6 +1,6 @@
 'use client'
 
-import { useTheme } from '@/components/theme/theme-provider'
+import { useTheme } from '@/components/theme/themeProvider'
 import { Button } from '@/components/ui/button'
 import { Moon, Sun } from 'lucide-react'
 
