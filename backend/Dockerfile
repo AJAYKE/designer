@@ -39,7 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
-RUN useradd -ms /bin/bash appuser
+# RUN useradd -ms /bin/bash appuser
 WORKDIR /app
 
 # Copy wheels from builder and install
@@ -51,15 +51,15 @@ RUN pip install --no-cache-dir /wheels/*
 COPY . /app
 
 # Switch to non-root
-USER appuser
+# USER appuser
 
 EXPOSE 8000
 
-# Healthcheck (optional) — expects your /health endpoint
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD ["python","-c","import sys,urllib.request; url='http://127.0.0.1:8000/health'; \
-r=0; \
-try:\n    resp=urllib.request.urlopen(url,timeout=3); r=0 if resp.status==200 else 1\nexcept Exception:\n    r=1\n; sys.exit(r)"]
+# # Healthcheck (optional) — expects your /health endpoint
+# HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+#   CMD ["python","-c","import sys,urllib.request; url='http://127.0.0.1:8000/health'; \
+# r=0; \
+# try:\n    resp=urllib.request.urlopen(url,timeout=3); r=0 if resp.status==200 else 1\nexcept Exception:\n    r=1\n; sys.exit(r)"]
 
 
 # Start the API
